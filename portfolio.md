@@ -1,4 +1,5 @@
 # Tekniikan portfolio
+Jesse Kiilamaa L4657
 ## 1. Johdanto
 
 Tämän raportin tarkoitus on tuoda esille Ticorporate Demo Lab -kurssin aikana tekemäni asiat ja siitä saatu tekninen osaaminen. Kerron siitä, mitä toiminnallisuuksia tein projektiin, sekä avaan joitakin niistä hieman enemmän koodiesimerkkien kera.
@@ -45,7 +46,7 @@ Kuvio 2. Kuvankaappaus diasta, jossa näkyy sovelluksen käyttöliittymän näky
 
 Projektin vaatimukset tarkentuivat tai muuttuivat jatkuvasti, ja samalla tekniikkakin koki muutoksia siellä täällä, mutta sovelluksen perustoimintaperiaate pysyi kuitenkin suurimmilta osin samana kuin ensimmäisen gaten versiossa: keräimen tiedot liikkuvat backendistä sovellukseen Socket.IO:n avulla ja backend ottaa vastaan keräinten lähettämän datan sekä sovelluksen lähettämän kuuntelemisilmoituksen keräimelle HTTP-kutsuina.
 
-### 4.1 Järjestelmän toiminnallisuuksia
+### 4.1 Järjestelmän toiminnallisuuksia tarkemmin
 
 Käydään seuraavaksi läpi joitakin toiminnallisuuksia, joita tein tähän projektiin. Koitan havainnollistaa niitä koodinpätkillä, joissa näkyy, miten haluttu toiminnallisuus on toteutettu.
 
@@ -131,7 +132,7 @@ Collector on Mongoose-malli, jonka avulla voidaan suorittaa tietokantatoimenpite
 
 #### 4.1.2 Keräimen tietojen vastaanotto ja lähetys
 
-Käydään läpi seuraavaksi keräimien tietojen reitti palvelimelle ja sieltä puhelimelle. Aloitetaan keräimen ja liinan Mongoose-skeemoilla, jotka olen luonut ryhmämme tutkimuksen ja asiakkaiden kanssa käytyjen keskusteluiden pohjalta. Skeemoja on päivitelty läpi projektin vastaamaan uusia vaatimuksia tai tarpeita, esimerkit ovat viimeisimmät versiot niistä.
+Käydään seuraavaksi läpi keräimien tietojen reitti palvelimelle ja sieltä puhelimelle, joka on ehdottomasti projektin isotöisimpiä ja monimutkaisimpia toteutuksia. Aloitetaan keräimen ja liinan Mongoose-skeemoilla, jotka olen luonut ryhmämme tutkimuksen ja asiakkaiden kanssa käytyjen keskusteluiden pohjalta. Skeemoja on päivitelty läpi projektin vastaamaan uusia vaatimuksia tai tarpeita, esimerkit ovat viimeisimmät versiot niistä.
 
 `models/Collector.js`
 ```javascript
@@ -386,6 +387,10 @@ SocketioServicen funktio `getMsg` luo ja palauttaa RxJS-kirjaston Observable-oli
 
 `app/shared/services/collector.service.ts`
 ```javascript
+// Array of collectors the user has connected to
+private connectedCollectors: Collector[] = [];
+private collectorSubject = new Rx.Subject<Collector[]>();
+
 constructor(
     private http: HttpClient,
     private ioServ: SocketioService
@@ -401,4 +406,195 @@ constructor(
 }
 ```
 
-CollectorService-palvelun puolella taasen tilataan getMsg:n palauttama olio, ja siltä saatava data annetaan argumenttina kutsuttavalle `pushCollector`-funktiolle.
+CollectorService-palvelun konstruktorissa taasen tilataan getMsg:n palauttama olio, ja siltä saatava data annetaan argumenttina kutsuttavalle `pushCollector`-funktiolle. Huomioitavaa on myös luokan muuttuja `connectedCollectors`, mikä on taulukko `Collector`-olioita. Ne on määritelty omassa `collector.ts`-tiedostossaan sovelluksen puolella, mukaillen tietoa mitä palvelimelta lähetetään. Palveluluokassa on myös `collectorSubject`-muuttuja, jonka avulla tietoa kerääjistä voidaan lähettää ja vastaanottaa muualla sovelluksessa.
+
+Katsotaan seuraavaksi `pushCollector`-funktiota.
+
+`app/shared/services/collector.service.ts`
+```javascript
+// Pushes a collector to the array of collectors
+pushCollector(data) {
+    // Boolean to check if a collector exists and needs to be modified
+    let matchFound = false;
+
+    // If no collectors exist, push the collector
+    if (this.connectedCollectors.length === 0) {
+        console.log('collector.service: no collectors yet, adding to list');
+        this.connectedCollectors.push({ _id: data.id, _error: data.error, _belts: data.belts });
+        this.sendCollectors();
+        return;
+    }
+
+    /* If there are existing collectors, go through the array
+        and if a match is found, update the belts and error status */
+    this.connectedCollectors.forEach(collector => {
+        if (collector._id === data.id) {
+            console.log('collector.service: match found, updating belts');
+            collector._error = data.error;
+            collector._belts = data.belts;
+            this.sendCollectors();
+            matchFound = true;
+        }
+    });
+
+    // If no match is found, push the collector
+    if (!matchFound) {
+        console.log('collector.service: no match found, adding to list');
+        this.connectedCollectors.push({ _id: data.id, _error: data.error, _belts: data.belts });
+        this.sendCollectors();
+    }
+}
+```
+
+Jos yhtään kerääjää ei ole vielä lisätty `connectedCollectors`-taulukkoon, lisätään uusi vastaanotettu kerääjä sinne. `sendCollectors`-lähettää tietoa kerääjistä eteenpäin aiemmin mainitun `collectorSubjectin` avulla. Jos taulukossa on jo olemassa kerääjiä, käydään ne läpi vastineiden varalta. Jos vastaava kerääjä löytyy taulukosta, päivitetään sen `_error`- ja `_belts`-muuttujat, ja lähetetään uutta tietoa jälleen eteenpäin. Mikäli yhtään vastinetta ei löydetä, lisätään kerääjä uutena taulukkoon, ja lähetetään uusi tieto eteenpäin.
+
+Katsotaan seuraavaksi `sendCollectors`-funktiota.
+
+`app/shared/services/collector.service.ts`
+```javascript
+/* Return an observable of a subject for others to subscribe to,
+   then return the current array of collectors to all subscribers
+   whenever this function is called */
+sendCollectors(): Rx.Observable<Collector[]> {
+    console.log('collector.service: sendCollectors() fired');
+    this.collectorSubject.next(this.connectedCollectors);
+    return this.collectorSubject.asObservable();
+}
+```
+
+Funktiossa `collectorSubject`-olion tilaajille/kuuntelijoille lähetetään `connectedCollectors`-muuttuja eli taulukko kerääjistä ja niiden tiedoista, joita sovellus on ottanut vastaan. Lisäksi funktio palauttaa `collectorSubject`-olion Observablena, joka voidaan tilata kuunneltavaksi muualla sovelluksessa. Katsotaan seuraavaksi tapausta, jossa tätä oliota kuunnellaan `CollectorsList`-komponentissa, joka on käytännössä sovelluksen päänäkymä.
+
+`app/components/collectors-list/collectors-list.component.ts`
+```javascript
+collectors: Collector[] = [];
+collectorSubscription: Subscription;
+
+constructor(
+  private router: RouterExtensions,
+  private collectorServ: CollectorService,
+  private ngZone: NgZone
+) {
+  this.collectorSubscription = this.collectorServ.sendCollectors()
+    .subscribe(
+      (data: Collector[]) => {
+        // Ajetaan ngZonessa, jotta UI päivittyy
+        this.ngZone.run(() => {
+          console.log('collectors-list.component: sendCollectors() sent data');
+          console.log('collectors-list.component: ' + JSON.stringify(data));
+          this.collectors = data;
+        });
+      }
+    );
+}
+```
+
+Komponentissa alustetaan tyhjä taulukko kerääjä-olioista muuttujaan `collectors`. Tätä taulukkomuuttujaa käytetään templaatin puolella tietojen näyttämiseen UI:ssa. Komponentin konstruktorissa kutsutaan `sendCollectors`-funktiota, ja sen palauttama Observable tilataan kuunneltavaksi. Vastaanotettava data laitetaan `collectors`-muuttujaan. Tätä pitää ajaa Angularin ngZone-palvelun avulla NgZonen sisällä, jotta UI päivittyy.
+
+Katsotaan seuraavaksi vielä, miten tätä `collectors`-muuttujaa käytetään templaatin puolella datan näyttämiseen. Näytän ensimmäisen gaten version koodia, sillä se on puhtaasti itse kirjoittamani. Projektin toinen ohjelmoija teki myöhemmin UI:n puolella todella paljon töitä, tehden käytännössä visuaalisen ulkoasun toteutuksen täysin itse mockupien pohjalta. Joidenkin näkymien, kuten `CollectorsList`-komponentin templaatin, toteutus on teknisesti kuitenkin samanlainen kuin allekirjoittaneen tekemät alkuperäiset versiot.
+
+`app/collectors-list/collectors-list.component.html`
+```html
+<StackLayout class="container">
+    <ScrollView orientation="vertical">
+        <FlexboxLayout class="sub-container">
+            <FlexboxLayout class="collector" *ngFor="let collector of collectors">
+
+                <FlexboxLayout class="ok" *ngIf="!collector._error">
+                    <Label class="collector-id" text="KERÄÄJÄ {{ collector._id }}" textWrap="true"></Label>
+                    <Label class="tight" text="LIINAT KIINNI: {{ beltTotal(collector._belts)[0] }}" textWrap="true"></Label>
+                    <Button class="btn-delete" text="Poista keräin" (tap)="onRemoveCollectorTap(collector._id)"></Button>
+                    <Button class="btn-info" text="Hallinta" (tap)="onManageTap(collector._id)"></Button>
+                </FlexboxLayout>
+
+                <FlexboxLayout class="error" *ngIf="collector._error">
+                    <Label class="collector-id" text="KERÄÄJÄ {{ collector._id }}" textWrap="true"></Label>
+                    <Label class="loose" text="LIINAT LÖYSÄLLÄ: {{ beltTotal(collector._belts)[1] }}" textWrap="true"></Label>
+                    <Label class="tight" text="LIINAT KIINNI: {{ beltTotal(collector._belts)[0] }}" textWrap="true"></Label>
+                    <Button class="btn-delete" text="Poista keräin" (tap)="onRemoveCollectorTap(collector._id)"></Button>
+                    <Button class="btn-info" text="Hallinta" (tap)="onManageTap(collector._id)"></Button>
+                </FlexboxLayout>
+
+            </FlexboxLayout>
+
+            <StackLayout class="collector">
+                <Button class="btn-add" text="Yhdistä keräin" (tap)="onCollectorAddTap()"></Button>
+                <Button class="btn-add" text="Send msg" (tap)="sendMessage()"></Button>
+            </StackLayout>
+        </FlexboxLayout>
+    </ScrollView>
+</StackLayout>
+```
+
+`FlexboxLayout`-elementit, joiden luokka on joko `ok` tai `error`, toimivat ns. kortteina, joiden sisällä näkyy tiedot keräimestä sekä painike keräimen poistamiseen tai hallintapaneeliin siirtymiseen. Myöhemmissä versioissa keräimen poistamis-toiminto on siirretty hallintapaneelin alle. `collector`-luokan elementin sisälle luodaan jokaista komponentin `collectors`-muuttujassa olevaa kerääjää varten oma `FlexboxLayout`-elementti, jonka luokka määräytyy sen mukaan, onko kerääjän `error` true vai false. Alimmaisena näkymässä on nappi, josta pääsee lisäämään uuden kerääjän. `sendMessagea` kutsuva nappi on kehitysvaiheessa testaamista varten tehty toiminto.
+
+Näitä `ok`- tai `error`-kortteja ylemmät elementit ovat lähinnä ryhmittämistä ja näytöllä kohdistamista varten. Toteutus voisi kyllä varmasti olla hienompi ja yksinkertaisempi näiden wrapperien osalta, mutta olen suht tyytyväinen tähänkin toteutukseen.
+
+### 4.2 Muita mainitsemisen arvoisia asioita
+
+Firebasen saaminen käyttöön Herokussa olevassa backendissa ympäristömuuttujia käyttämällä tarvitsi hieman erikoisemman ratkaisun.
+
+```javascript
+var admin = require('firebase-admin');
+
+if (!fs.existsSync('./config/serviceAccount.json')) {
+  fs.writeFileSync('./config/serviceAccount.json', process.env.GOOGLE_CREDENTIALS, (err) => {
+    if (err) {
+      console.log(err);
+    }
+  });
+}
+
+admin.initializeApp({
+  credential: admin.credential.cert('./config/serviceAccount.json')
+});
+```
+
+NPM-paketti `firebase-admin` vaatii `serviceAccount.json`-tiedoston tietääkseen, mikä projekti on kyseessä. En halunnut lisätä tätä tiedostoa repoon, sillä se sisälsi arkaluontoista tietoa. Tämän JSON-sisällön tunkeminen Herokun ympäristömuuttujiin ei kuitenkaan riittänyt, joten minun oli luotava nopea if-lause tarkistamaan, onko tätä tiedostoa olemassa config-kansiossa, ja jos sitä ei ole olemassa, luodaan se, ja sisällöksi kirjoitetaan `GOOGLE_CREDENTIALS`-ympäristömuuttujan arvo, joka on `serviceAccount`-tiedoston sisältö. Tämän jälkeen pystyin käyttämään tätä tiedostoa Firebasen tunnistautumiseen ilman, että minun piti lisätä arkaluontoista tietoa repoon.
+
+Katsotaan vielä, miten Firebasen avulla voidaan lähettää push-ilmoituksia palvelimelta.
+
+```javascript
+sendPushNotificationsToClients = (clients, data) => {
+    if (data.error) {
+        clients.forEach(client => {
+            app.admin.messaging().send({
+                android: {
+                    priority: 10,
+                    notification: {
+                        title: 'Liina on löystynyt!',
+                        body: `Keräimestä ${data.id} on löystynyt yksi tai useampi liina.`,
+                        sound: 'default'
+                    }
+                },
+                token: client
+            }).then((response) => {
+                console.log('Succesfully sent message:', response);
+            }).catch((error) => {
+                console.log('Error sending message:', error);
+            });
+        });
+    }
+}
+```
+
+`Data` on käytännössä objekti, missä on keräimen ID, error ja liinat. Jos `error` on true, pitää lähettää löysistä liinoista push-ilmoitus käyttäjälle. Kerääjää kuuntelevat clientit käydään yksi kerrallaan läpi forEach-loopissa, jonka sisällä käytetään `app.js`:n puolelta importattua `firebase-admin`-moduulin `messaging`-funktiota push-ilmoituksen lähettämiseen. Android on ainoa alusta, jolle teimme käytännössä työtä ja testausta, joten käytimme Androidille spesifejä ilmoitusasetuksia. `Token` määrää kenelle viesti lähetetään, ja koska jokaisen clientin yksilöllinen ID sovelluksen puolella on Firebasen push registration token, voidaan tätä käyttää suoraan `token`-kentän arvona.
+
+## 5. Sivutyö tai sen puute
+
+Mainitsin raportin alussa siitä, miten sivutyöni eli testaaminen jäi hieman välistä. Ainoa selitys, jonka voin antaa, on se, että työaikani meni täysin ohjelman kehittämiseen, joten en kyennyt keskittymään testaamiseen niin paljon kuin olisin kenties halunnut. Olin kuitenkin melko pitkään mukana testaajapalavereissa ja luin opettajan vaatiman testaamista käsittelevän kirjan. Tämä ei kuitenkaan taida täyttää testaamisen sivutyön kriteerejä, mutta uskon tehneeni tekniikkaa niin paljon ja kokonaisvaltaisesti, että pelkkä tekniikan tekeminen riittää omalta osaltani. 
+
+Lisäksi, tein loppupeleissä silti todella paljon testaamista järjestelmän parissa, sillä ohjelman kehittäminenhän vaatii aina jatkuvasti testaamista - kääntyykö koodi, ajaako se virheittä, toimivatko toiminnallisuudet niin kuin pitää, raja-arvot pitää testata, toimiiko yhteys järjestelmän eri osien välillä jne. Joten täysin toimetta en testaamisen saralla jäänyt, en vain tehnyt sitä kovin järjestelmällisesti, automatisoidusti tahi raportoinut sitä.
+
+## 6. Parannettavaa?
+
+Kaikesta löytyy aina parannettavaa, mutta esimerkiksi mobiilisovelluksen puolella olisin voinut kunnostautua paljon enemmän visuaalisen ilmeen toteuttamisen parissa, jota en ensimmäisen gaten jälkeen tainnut tehdä miltei lainkaan. Olin enempi keskittynyt toiminnallisuuksien toteuttamiseen ja niiden toimimiseen, kuin miltä sovellus näyttää.
+
+Dokumentaatiota en ole tämän raportin kirjoittamisajankohtana kerinnyt kirjoittaa, jos tässä raportissa selitettyjä toiminnallisuuksia ei oteta huomioon. Kommentointia olen koittanut tehdä parhaani mukaan, mutta sitä vielä puuttuu ja kenties joidenkin kommenttien muotoja tai selityksiä voisi hieman viilailla.
+
+## 7. Pohdinta
+
+Ticorporate oli todella opettavainen opintojakso. Se antoi mielestäni melko hyvän käsityksen siitä, millaista projekteissa työskentely käytännössä on, ja uskon tämän antavan hyviä valmiuksia työelämää varten. Lisäksi, koska teimme asiakasprojektia, saimme konkreettista kokemusta asiakkaan kanssa työskentelystä ja kommunikaation tärkeydestä, jossa onnistuimme mielestämme hyvin. Scrumin käytänteet ja ketterä kehittäminen tulivat myös tutuiksi projektin aikana.
+
+Oman tekemisen osalta olen tyytyväinen siihen, mitä olen saanut aikaan ja miten olen kehittynyt osaajana. Sain otettua haltuun täysin uuden teknologian, NativeScriptin, ja yhdistettyä aiempaa web-sovelluskehitysosaamistani sen kanssa työskentelemiseen onnistuneesti. Muistan hyvin sen onnistumisen tunteen, kun sain sovelluksen luomaan yhteyden palvelimeen Socket.IO:n avulla, ja kun ensimmäisen kerran näin sovelluksen etusivun päivittyvän automaattisesti lähetettyäni HTTP-kutsulla uutta tietoa palvelimelle. Se osoitti minulle, että osaan juurikin sitä, mitä halusin - kehitystyötä järjestelmän joka osa-alueella aina tietokanta- ja palvelinpuolelta client-sovellukseen.
+
+Kiitos kaikille opettajille, labramestari Pölkille, mentori Hanhelalle, kaikille muille Ticorporatelaisille sekä tietenkin omille ryhmäläisilleni tästä puolesta vuodesta. Hauskaa oli!
