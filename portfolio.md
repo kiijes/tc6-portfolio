@@ -533,6 +533,7 @@ Näitä `ok`- tai `error`-kortteja ylemmät elementit ovat lähinnä ryhmittämi
 
 Firebasen saaminen käyttöön Herokussa olevassa backendissa ympäristömuuttujia käyttämällä tarvitsi hieman erikoisemman ratkaisun.
 
+`app.js`
 ```javascript
 var admin = require('firebase-admin');
 
@@ -553,6 +554,7 @@ NPM-paketti `firebase-admin` vaatii `serviceAccount.json`-tiedoston tietääksee
 
 Katsotaan vielä, miten Firebasen avulla voidaan lähettää push-ilmoituksia palvelimelta.
 
+`controller/collector.controller.js`
 ```javascript
 sendPushNotificationsToClients = (clients, data) => {
     if (data.error) {
