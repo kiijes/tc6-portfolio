@@ -109,7 +109,7 @@ io.on('connection', (socket) => {
 });
 ```
 
-Käyttäjän muodostaessa Socket.IO-yhteys palvelimelle luodaan myös EventEmitter, jonka avulla voidaan REST API:n kontrollerin puolelta välittää tietoa Socket.IO:lle. Saadessaan `join channel` eventin vastaan, palvelin lisää sen lähettäneen socketin parametrina annetun merkkijonon nimiseen huoneeseen. Tässä tapauksessa huoneen nimi on clientin saaman Firebase push registration tokenin arvo. Samalla huoneeseen liittyessään kutsutaan kontrollerista funktiota sendToListeners, joka lähettää huonetta kuunteleville clienteille (käytännössä siis vain yhdelle clientille) tietoja kerääjistä, jos he kuuntelevat yhtäkään niistä. Ohessa kyseinen `sendToListeners`-funktio.
+Käyttäjän muodostaessa Socket.IO-yhteys palvelimelle luodaan myös `EventEmitter`-olio, jonka avulla voidaan REST API:n kontrollerin puolelta välittää tietoa Socket.IO:lle. Saadessaan `join channel` eventin vastaan, palvelin lisää sen lähettäneen socketin parametrina annetun merkkijonon nimiseen huoneeseen. Tässä tapauksessa huoneen nimi on clientin saaman Firebase push registration tokenin arvo. Samalla huoneeseen liittyessään kutsutaan kontrollerista funktiota sendToListeners, joka lähettää huonetta kuunteleville clienteille (käytännössä siis vain yhdelle clientille) tietoja kerääjistä, jos he kuuntelevat yhtäkään niistä. Ohessa kyseinen `sendToListeners`-funktio.
 
 `controller/collector.controller.js`
 ```javascript
@@ -333,3 +333,72 @@ updateBelts = (collector, req) => {
     return collector;
 }
 ```
+
+Jälleen lyhyesti tiivistettynä tämä funktio käy läpi kaikki alkuperäisessä dokumentissa olevat liinat, ja koittaa etsiä niille vastinetta kutsussa olevista liinoista. Jos sama liina löytyy kutsusta, alkuperäisessä dokumentissa olevat tiedot päivitetään ja liina poistetaan kutsun liinoista. Jos vastinetta ei löydy, on `matchFound`-muuttuja false, ja kutsusta löytymätön liina merkitään löysäksi. Tämä perustuu olettamukseen, että kaikki liinat löytyisivät aina kutsusta, jos ne olisivat kireitä, ja puuttuva liina olisi siis löystynyt tai muuten virheellinen. Kun kaikki liinat on käyty läpi, on kutsusta poistettu kaikki liinat, jotka löytyvät alkuperäisestä dokumentista. Jäljelle saattaa jäädä uusia liinoja, jotka lisätään alkuperäiseen dokumenttiin, jos niitä on. Tämän jälkeen käydään liinat vielä läpi, merkataan löysät liinat ja annetaan löystymisaika, ja merkataan kerääjän error-status joko trueksi tai falseksi. Sen jälkeen palautetaan kerääjä-dokumentti.
+
+Katsotaan, miten data lähetetään mobiilisovelluksille, jotka kuuntelevat kerääjää.
+
+`controller/collector.controller.js`
+```javascript
+sendDataToClients = (clients, data, sendPushNotification) => {
+    if (app.emitter) {
+        console.log('emitting event post');
+        app.emitter.emit('post', clients, data);
+    }
+
+    if (sendPushNotification) {
+        sendPushNotificationsToClients(clients, data);
+    }
+}
+```
+
+`sendData`-funktiossa kutsutaan `sendDataToClients`-funktiota, jos kerääjää kuuntelee jokin mobiilisovellus. Jos jokin socket on yhteydessä palvelimeen, on `app.emitter` olemassa ja importattu `app.js`-tiedoston puolelta. Tällä EventEmitter-oliolla lähetetään event `post`. Lisäksi kutsutaan `sendPushNotificationsToClients`-funktiota, joka arvioi, pitääkö clienteille lähettää uusista tiedoista push-ilmoitusta.
+
+`app.js`
+```javascript
+eventEmitter.on('post', (clients, data) => {
+    clients.forEach(client => {
+      console.log('sending data to client: ' + client);
+      console.log('typeof client is: ' + typeof client);
+      io.in(client).emit('message', data);
+    });
+});
+```
+
+Ohessa pätkä koodia `app.js`:n sisältä, joka kuuntelee `post`-eventtejä ja lähettää kaikille kuunteleville clienteille uuden, käsitellyn datan eli käytännössä kerääjä-dokumentin ID:n, errorin ja liina-taulukon arvot. Tämä lähetetään Socket.IO-eventtinä `message`.
+
+Käydään seuraavaksi mobiilisovelluksen puolella katsomassa, miten dataa otetaan siellä vastaan.
+
+`app/shared/services/socketio.service.ts`
+```javascript
+getMsg() {
+    let observable = Rx.Observable.create(obs => {
+        this.socket.on('message', (data) => {
+            console.log('socketio.service: got message from backend');
+            obs.next(data);
+        });
+    });
+    return observable;
+}
+```
+
+SocketioServicen funktio `getMsg` luo ja palauttaa RxJS-kirjaston Observable-olion, joka kuuntelee Socket.IO:n `message`-eventtejä ja vie sen eteenpäin kuunteleville observereille.
+
+`app/shared/services/collector.service.ts`
+```javascript
+constructor(
+    private http: HttpClient,
+    private ioServ: SocketioService
+) {
+    /* Subscribe to the observable created in the socket.io
+        service and pass the data received to pushCollector()
+        function */
+    this.collectorSubscription = this.ioServ.getMsg().subscribe(
+        (data) => {
+            this.pushCollector(data);
+        }
+    );
+}
+```
+
+CollectorService-palvelun puolella taasen tilataan getMsg:n palauttama olio, ja siltä saatava data annetaan argumenttina kutsuttavalle `pushCollector`-funktiolle.
